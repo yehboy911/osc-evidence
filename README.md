@@ -20,6 +20,10 @@ osc-evidence audit /path/to/cmake/project
 
 # Write report to file
 osc-evidence audit /path/to/cmake/project --output report.md
+
+# Exclude one or more subdirectory prefixes from scanning (relative to SOURCE_DIR)
+osc-evidence audit /path/to/cmake/project --exclude modularization/build/tools
+osc-evidence audit /path/to/cmake/project -e third_party/llvm -e build
 ```
 
 ## What It Checks
@@ -46,24 +50,37 @@ osc-evidence audit /path/to/cmake/project --output report.md
 
 ```markdown
 # OSC Compliance Report
-- Generated: 2026-02-20
-- Source Directory: /path/to/project
+
+- **Generated:** 2026-02-20
+- **Source Directory:** `/path/to/project`
+- **CMake Files Scanned:** 12
+- **Targets Found:** 8
+- **Findings Collected:** 34
 
 ## Summary
 | Status | Count |
+|--------|-------|
 | PASS   | 9     |
 | FAIL   | 0     |
 | MANUAL | 5     |
 | N/A    | 1     |
 
 ## OSC Compliance Checkpoints
-| Checkpoint | Status | Legal Translation | Evidence | Line | File |
+| Checkpoint | Status | Legal Translation | Evidence (Code Snippet) | Line | File |
 ...
 
 ## Build Graph Summary
 ...
 
 ## Action Items
+
+### FAIL — Immediate Attention Required
+...
+
+### MANUAL — Human Review Required
+...
+
+## Parser Warnings
 ...
 ```
 
@@ -71,3 +88,7 @@ osc-evidence audit /path/to/cmake/project --output report.md
 
 - Python 3.8+
 - No external dependencies (pure stdlib)
+
+## License
+
+MIT License — Copyright (c) 2026 Owen Yeh. See [LICENSE](LICENSE).
