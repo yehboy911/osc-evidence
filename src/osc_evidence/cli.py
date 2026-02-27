@@ -13,6 +13,7 @@ from pathlib import Path
 from .cmake_parser import CMakeParser
 from .checkpoint_engine import CheckpointEngine
 from .report_generator import ReportGenerator
+from .gpl_scanner import build_gpl_set
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -45,6 +46,28 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="exclude",
         help="Exclude directory path prefix(es) from scanning (repeatable). "
              "Path is relative to SOURCE_DIR. Example: --exclude modularization/build/tools",
+    )
+    audit.add_argument(
+        "--config-h",
+        metavar="FILE",
+        default=None,
+        dest="config_h",
+        help="Path to FFmpeg config.h for enhanced GPL/nonfree detection (CP01/CP04)",
+    )
+    audit.add_argument(
+        "--sbom",
+        metavar="FILE",
+        action="append",
+        default=[],
+        dest="sbom_paths",
+        help="OSC-format SBOM CSV for GPL/LGPL component confirmation (repeatable)",
+    )
+    audit.add_argument(
+        "--no-interactive",
+        action="store_true",
+        default=False,
+        dest="no_interactive",
+        help="Disable the interactive enhanced-scan menu (for CI/scripts)",
     )
     return root
 
@@ -83,8 +106,56 @@ def _run_audit(args: argparse.Namespace) -> int:
         for w in parse_result.warnings:
             print(f"  WARNING: {w}", file=sys.stderr)
 
+    config_h_path = args.config_h
+    sbom_paths = list(args.sbom_paths)
+
+    # Interactive menu for enhanced scan options (skipped when --no-interactive
+    # is set, all options already supplied, or stdout is not a terminal)
+    has_all_opts = config_h_path is not None and sbom_paths
+    if not has_all_opts and not args.no_interactive and sys.stdin.isatty():
+        try:
+            from .interactive_menu import (
+                MenuOption, prompt_config_h, prompt_sbom_csv, show_menu,
+            )
+            opts = []
+            if config_h_path is None:
+                opts.append(MenuOption(
+                    "config_h",
+                    "FFmpeg config.h scan — detect --enable-gpl / --enable-nonfree (CP01/CP04)",
+                    selected=False,
+                ))
+            if not sbom_paths:
+                opts.append(MenuOption(
+                    "sbom_csv",
+                    "SBOM CSV for GPL confirmation — provide OSC SBOM CSV path(s) (CP06)",
+                    selected=False,
+                ))
+            if opts:
+                chosen = show_menu(opts)
+                for opt in chosen:
+                    if opt.key == "config_h" and opt.selected:
+                        config_h_path = prompt_config_h()
+                    elif opt.key == "sbom_csv" and opt.selected:
+                        sbom_paths = prompt_sbom_csv()
+        except Exception:
+            pass  # non-fatal; proceed without enhanced scan
+
+    # Build confirmed GPL/LGPL component list (LICENSE scan + SBOM CSV)
+    gpl_components = build_gpl_set(str(source_dir), sbom_paths or None)
+    if gpl_components:
+        print(
+            f"GPL/LGPL components confirmed: "
+            f"{', '.join(c.name + ' (' + c.license + ')' for c in gpl_components)}",
+            file=sys.stderr,
+        )
+
     engine = CheckpointEngine()
-    results = engine.run_all(parse_result)
+    results = engine.run_all(
+        parse_result,
+        config_h_path=config_h_path,
+        gpl_components=gpl_components,
+        source_dir=str(source_dir),
+    )
 
     generator = ReportGenerator(
         source_dir=str(source_dir),

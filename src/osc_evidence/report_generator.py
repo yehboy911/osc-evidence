@@ -15,6 +15,13 @@ from .cmake_parser import CmakeTarget, ParseResult
 from .checkpoints.base import CheckpointResult, PASS, FAIL, MANUAL, NA
 
 
+# Tier grouping for report display
+_TIERS = [
+    ("Tier 1: GPL/LGPL Direct Risk Detection", ["CP01", "CP02", "CP04", "CP05", "CP06"]),
+    ("Tier 2: Build System Hygiene", ["CP03", "CP07", "CP08", "CP09", "CP10", "CP11", "CP12"]),
+    ("Tier 3: External Source Tracking", ["CP13", "CP14", "CP15"]),
+]
+
 _VERDICT_BADGE = {
     PASS:   "**PASS**",
     FAIL:   "**FAIL**",
@@ -69,37 +76,66 @@ class ReportGenerator:
             f"| {v} | {counts[v]} |"
             for v in (PASS, FAIL, MANUAL, NA)
         )
+
+        results_by_id = {r.checkpoint_id: r for r in self.results}
+
+        tier_rows: List[str] = []
+        for tier_label, cp_ids in _TIERS:
+            tc = {PASS: 0, FAIL: 0, MANUAL: 0, NA: 0}
+            for cp_id in cp_ids:
+                r = results_by_id.get(cp_id)
+                if r:
+                    tc[r.verdict] = tc.get(r.verdict, 0) + 1
+            tier_rows.append(
+                f"| {tier_label} | {tc[PASS]} | {tc[FAIL]} | {tc[MANUAL]} | {tc[NA]} |"
+            )
+
         return (
             "## Summary\n\n"
             "| Status | Count |\n"
             "|--------|-------|\n"
             + rows
+            + "\n\n### Per-Tier Breakdown\n\n"
+            "| Tier | PASS | FAIL | MANUAL | N/A |\n"
+            "|------|------|------|--------|-----|\n"
+            + "\n".join(tier_rows)
         )
 
     def _checkpoint_table(self) -> str:
-        header = (
-            "## OSC Compliance Checkpoints\n\n"
+        results_by_id = {r.checkpoint_id: r for r in self.results}
+
+        table_header = (
             "| Checkpoint | Status | Legal Translation | Evidence (Code Snippet) | Line | File |\n"
-            "|---|---|---|---|---|---|\n"
+            "|---|---|---|---|---|---|"
         )
-        rows: List[str] = []
-        for r in self.results:
-            badge = _VERDICT_BADGE.get(r.verdict, r.verdict)
-            ev = r.primary_evidence()
-            if ev:
-                snippet = self._escape_md(ev.snippet[:120])
-                line = str(ev.line_no)
-                file_ = self._short_path(ev.file)
-            else:
-                snippet = "—"
-                line = "—"
-                file_ = "—"
-            legal = self._escape_md(r.legal_translation)
-            cp_label = f"{r.checkpoint_id} — {r.name}"
-            rows.append(
-                f"| {cp_label} | {badge} | {legal} | `{snippet}` | {line} | {file_} |"
-            )
-        return header + "\n".join(rows)
+
+        sections: List[str] = ["## OSC Compliance Checkpoints"]
+
+        for tier_label, cp_ids in _TIERS:
+            rows: List[str] = []
+            for cp_id in cp_ids:
+                r = results_by_id.get(cp_id)
+                if not r:
+                    continue
+                badge = _VERDICT_BADGE.get(r.verdict, r.verdict)
+                ev = r.primary_evidence()
+                if ev:
+                    snippet = self._escape_md(ev.snippet[:120])
+                    line = "—" if ev.line_no == 0 else str(ev.line_no)
+                    file_ = self._short_path(ev.file)
+                else:
+                    snippet = "—"
+                    line = "—"
+                    file_ = "—"
+                legal = self._escape_md(r.legal_translation)
+                cp_label = f"{r.checkpoint_id} — {r.name}"
+                rows.append(
+                    f"| {cp_label} | {badge} | {legal} | `{snippet}` | {line} | {file_} |"
+                )
+            if rows:
+                sections.append(f"### {tier_label}\n\n{table_header}\n" + "\n".join(rows))
+
+        return "\n\n".join(sections)
 
     def _build_graph(self) -> str:
         if not self.pr.targets:
@@ -126,33 +162,45 @@ class ReportGenerator:
         if not manual_results and not fail_results:
             return ""
 
+        # Build lookup: checkpoint_id → tier label
+        cp_to_tier = {}
+        for tier_label, cp_ids in _TIERS:
+            for cp_id in cp_ids:
+                cp_to_tier[cp_id] = tier_label
+
         parts = ["## Action Items"]
 
-        if fail_results:
-            parts.append("\n### FAIL — Immediate Attention Required\n")
-            for r in fail_results:
-                parts.append(f"#### {r.checkpoint_id} — {r.name}\n")
-                parts.append(f"**Finding:** {r.legal_translation}\n")
-                for ev in r.evidence:
-                    parts.append(f"- `{self._escape_md(ev.snippet[:120])}` — {ev.file} line {ev.line_no}")
-                    if ev.note:
-                        parts.append(f"  - *{ev.note}*")
-                parts.append("")
+        for verdict_label, result_set in [
+            ("FAIL — Immediate Attention Required", fail_results),
+            ("MANUAL — Human Review Required", manual_results),
+        ]:
+            if not result_set:
+                continue
+            parts.append(f"\n### {verdict_label}\n")
 
-        if manual_results:
-            parts.append("\n### MANUAL — Human Review Required\n")
-            for r in manual_results:
-                parts.append(f"#### {r.checkpoint_id} — {r.name}\n")
-                parts.append(f"**Finding:** {r.legal_translation}\n")
-                if r.manual_notes:
-                    for note in r.manual_notes:
-                        parts.append(f"- {note}")
+            # Group results by tier, preserving tier order
+            tier_groups: List[tuple] = []
+            seen_tiers: set = set()
+            for tier_label, cp_ids in _TIERS:
+                tier_results = [r for r in result_set if r.checkpoint_id in cp_ids]
+                if tier_results:
+                    tier_groups.append((tier_label, tier_results))
+
+            for tier_label, tier_results in tier_groups:
+                parts.append(f"#### {tier_label}\n")
+                for r in tier_results:
+                    parts.append(f"##### {r.checkpoint_id} — {r.name}\n")
+                    parts.append(f"**Finding:** {r.legal_translation}\n")
+                    if r.verdict == MANUAL and r.manual_notes:
+                        for note in r.manual_notes:
+                            parts.append(f"- {note}")
+                        parts.append("")
+                    for ev in r.evidence:
+                        loc = f"— {ev.file}" if ev.line_no == 0 else f"— {ev.file} line {ev.line_no}"
+                        parts.append(f"- `{self._escape_md(ev.snippet[:120])}` {loc}")
+                        if ev.note:
+                            parts.append(f"  - *{ev.note}*")
                     parts.append("")
-                for ev in r.evidence:
-                    parts.append(f"- `{self._escape_md(ev.snippet[:120])}` — {ev.file} line {ev.line_no}")
-                    if ev.note:
-                        parts.append(f"  - *{ev.note}*")
-                parts.append("")
 
         return "\n".join(parts)
 

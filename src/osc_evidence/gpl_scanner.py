@@ -1,0 +1,251 @@
+"""
+gpl_scanner.py
+==============
+Confirms which project components are GPL/LGPL via two methods:
+
+1. LICENSE file scanning — walks source tree for LICENSE/COPYING files
+2. SBOM CSV parsing — reads OSC-format SBOM CSVs
+
+Used by CP06 to scope static-linking analysis to confirmed GPL/LGPL
+components only, eliminating false positives from name-matching heuristics.
+
+LXCE product structure reference:
+  - extlibs/ = pre-compiled headers + libs (no CMakeLists.txt inside)
+  - Linking happens in main project CMakeLists, not in extlibs dirs
+  - SBOM CSVs (win.csv, linux.csv) at tool root in OSC format
+  - GPL source tarballs in misc/source/ for redistribution compliance
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import os
+import re
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+# LICENSE/COPYING file names to scan
+_LICENSE_NAMES = {
+    "LICENSE", "COPYING", "LICENSE.txt", "COPYING.txt",
+    "LICENSE.md", "COPYING.md", "LICENSE.MIT", "LICENCE",
+    "LICENCE.txt",
+}
+
+# Patterns to detect GPL/LGPL in license file content
+_GPL_TEXT = re.compile(
+    r"GNU\s+GENERAL\s+PUBLIC\s+LICENSE|GPL-[23]\.0|"
+    r"\bGPLv[23]\b",
+    re.IGNORECASE,
+)
+_LGPL_TEXT = re.compile(
+    r"GNU\s+LESSER\s+GENERAL\s+PUBLIC\s+LICENSE|LGPL-[23]\.[01]|"
+    r"\bLGPLv[23]\b",
+    re.IGNORECASE,
+)
+
+# SPDX-style identifiers in SBOM license column
+_SPDX_LGPL = re.compile(r"\bLGPL\b", re.IGNORECASE)
+_SPDX_GPL = re.compile(r"\bGPL\b", re.IGNORECASE)
+
+# Licenses to skip in SBOM parsing
+_SKIP_LICENSES = {"PROPRIETARY", "IGNORE", "NOT DISTRIBUTED", ""}
+
+# Version suffix pattern for name normalization
+_VERSION_SUFFIX = re.compile(r"[-_][\d]+(?:\.[\d]+)*(?:[-_.]\w+)*$")
+
+
+@dataclass
+class GplComponent:
+    """A confirmed GPL/LGPL component found via LICENSE file or SBOM CSV."""
+    name: str                    # e.g. "cygwin", "xorriso", "blowfish"
+    license: str                 # e.g. "LGPL-3.0", "GPL-3.0"
+    classification: str          # "gpl" | "lgpl" | "gpl_or_lgpl"
+    source_path: str             # relative path within source tree
+    confirmed_by: str            # "license_file" | "sbom_csv"
+
+
+def _normalize_name(name: str) -> str:
+    """Normalize component name: lowercase, strip version suffixes."""
+    n = name.strip().lower()
+    n = _VERSION_SUFFIX.sub("", n)
+    return n
+
+
+def _classify_license_spdx(license_str: str) -> str:
+    """Classify a license string as gpl, lgpl, or gpl_or_lgpl."""
+    has_lgpl = bool(_SPDX_LGPL.search(license_str))
+    has_gpl = bool(_SPDX_GPL.search(license_str))
+    if has_lgpl and has_gpl:
+        return "gpl_or_lgpl"
+    if has_lgpl:
+        return "lgpl"
+    if has_gpl:
+        return "gpl"
+    return "gpl"  # fallback — caller already filtered for GPL presence
+
+
+def scan_license_files(source_dir: str) -> List[GplComponent]:
+    """Walk source tree for LICENSE/COPYING files and identify GPL/LGPL components.
+
+    Reads first 30 lines of each license file to detect GPL/LGPL text.
+    Component name is derived from the containing directory's basename.
+    """
+    results: List[GplComponent] = []
+    source_root = os.path.abspath(source_dir)
+
+    for dirpath, dirnames, filenames in os.walk(source_root):
+        # Skip hidden dirs, build dirs, .git
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith(".") and d not in {"build", "__pycache__", "node_modules"}
+        ]
+
+        for fname in filenames:
+            if fname not in _LICENSE_NAMES:
+                continue
+
+            fpath = os.path.join(dirpath, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    header_lines = []
+                    for i, line in enumerate(f):
+                        if i >= 30:
+                            break
+                        header_lines.append(line)
+                header = "".join(header_lines)
+            except OSError:
+                continue
+
+            is_lgpl = bool(_LGPL_TEXT.search(header))
+            is_gpl = bool(_GPL_TEXT.search(header))
+
+            if not is_gpl and not is_lgpl:
+                continue
+
+            # Derive component name from directory
+            rel_dir = os.path.relpath(dirpath, source_root)
+            dir_basename = os.path.basename(dirpath)
+            comp_name = _normalize_name(dir_basename)
+
+            # Determine license string and classification
+            if is_lgpl:
+                classification = "lgpl"
+                # Try to extract specific SPDX from header
+                m = re.search(r"LGPL-[\d.]+", header)
+                lic = m.group(0) if m else "LGPL"
+            elif is_gpl:
+                classification = "gpl"
+                m = re.search(r"GPL-[\d.]+", header)
+                lic = m.group(0) if m else "GPL"
+            else:
+                continue
+
+            # If both GPL and LGPL found, LGPL takes precedence (more specific)
+            if is_lgpl and is_gpl:
+                classification = "gpl_or_lgpl"
+
+            results.append(GplComponent(
+                name=comp_name,
+                license=lic,
+                classification=classification,
+                source_path=rel_dir,
+                confirmed_by="license_file",
+            ))
+
+    return results
+
+
+def parse_sbom_csv(csv_path: str) -> List[GplComponent]:
+    """Parse an OSC-format SBOM CSV and extract GPL/LGPL components.
+
+    OSC CSV format:
+    - Rows 1-27: metadata (product name, version, scan tool, etc.)
+    - Header row: starts with "OSS Component Name" (possibly multi-line cell)
+    - Data rows follow header
+    - Key columns: A=name, B=version, C=license, D=link, E=source_path
+    """
+    results: List[GplComponent] = []
+
+    try:
+        # Handle UTF-8 BOM
+        with open(csv_path, "r", encoding="utf-8-sig", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return results
+
+    reader = csv.reader(io.StringIO(content))
+    header_found = False
+
+    for row in reader:
+        if not row:
+            continue
+
+        # Look for header row
+        if not header_found:
+            cell0 = row[0].strip().replace("\n", " ")
+            if cell0.upper().startswith("OSS COMPONENT NAME"):
+                header_found = True
+            continue
+
+        # Parse data row
+        if len(row) < 3:
+            continue
+
+        comp_name = row[0].strip()
+        # version = row[1].strip() if len(row) > 1 else ""
+        license_str = row[2].strip() if len(row) > 2 else ""
+        source_path = row[4].strip() if len(row) > 4 else ""
+
+        if not comp_name:
+            continue
+        if license_str.upper() in _SKIP_LICENSES:
+            continue
+
+        # Filter for GPL/LGPL only
+        if not _SPDX_GPL.search(license_str):
+            continue
+
+        classification = _classify_license_spdx(license_str)
+
+        results.append(GplComponent(
+            name=_normalize_name(comp_name),
+            license=license_str,
+            classification=classification,
+            source_path=source_path,
+            confirmed_by="sbom_csv",
+        ))
+
+    return results
+
+
+def build_gpl_set(
+    source_dir: str,
+    sbom_paths: Optional[List[str]] = None,
+) -> List[GplComponent]:
+    """Build a merged, deduplicated list of confirmed GPL/LGPL components.
+
+    Runs LICENSE file scan + all SBOM CSV parses.
+    SBOM data takes precedence over LICENSE file scan (more authoritative).
+    """
+    components: List[GplComponent] = []
+
+    # Method 1: LICENSE file scan
+    components.extend(scan_license_files(source_dir))
+
+    # Method 2: SBOM CSV parsing
+    if sbom_paths:
+        for csv_path in sbom_paths:
+            components.extend(parse_sbom_csv(csv_path))
+
+    # Deduplicate by normalized name — SBOM takes precedence
+    seen: dict[str, GplComponent] = {}
+    for comp in components:
+        key = comp.name
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = comp
+        elif comp.confirmed_by == "sbom_csv" and existing.confirmed_by != "sbom_csv":
+            seen[key] = comp  # SBOM overrides LICENSE file
+
+    return list(seen.values())

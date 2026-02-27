@@ -1,9 +1,11 @@
 """CP08 — Source-to-Target Traceability"""
 
 from __future__ import annotations
+
 from typing import List, Set
+
 from ..cmake_parser import ParseResult
-from .base import CheckpointBase, CheckpointResult, Evidence, PASS, MANUAL
+from .base import CheckpointBase, CheckpointResult, Evidence, MANUAL, PASS
 
 
 class CP08SourceTraceability(CheckpointBase):
@@ -15,48 +17,64 @@ class CP08SourceTraceability(CheckpointBase):
 
         # Targets that have explicit target_sources() calls
         traced_targets: Set[str] = set()
-        evidence: List[Evidence] = []
+        ts_evidence: List[Evidence] = []
 
         for f in target_sources_findings:
             parts = f.args_text.split()
             if parts:
                 traced_targets.add(parts[0])
-            evidence.append(self._to_evidence(
-                f, "Source files explicitly mapped to target"
+            ts_evidence.append(self._to_evidence(
+                f, "Source files explicitly mapped to target via target_sources()"
             ))
 
-        # Count targets that lack explicit source mapping
+        # Assess remaining targets
+        inline_evidence: List[Evidence] = []
         no_trace: List[Evidence] = []
+
         for t in pr.targets:
             if t.target_type in ("INTERFACE", "CUSTOM"):
                 continue
-            if t.name not in traced_targets:
+            if t.name in traced_targets:
+                continue
+            if t.source_files:
+                # Inline sources in add_library/add_executable — traceability exists
+                src_list = ", ".join(t.source_files[:5])
+                if len(t.source_files) > 5:
+                    src_list += f", … (+{len(t.source_files) - 5} more)"
+                inline_evidence.append(Evidence(
+                    snippet=f"add_library/executable({t.name} {t.target_type} {' '.join(t.source_files[:3])} ...)",
+                    line_no=t.line_no, file=t.file,
+                    note=f"Target '{t.name}' has {len(t.source_files)} inline source(s): {src_list}",
+                ))
+            else:
                 no_trace.append(Evidence(
                     snippet=f"add_library/executable({t.name} {t.target_type} ...)",
                     line_no=t.line_no, file=t.file,
-                    note=f"Target '{t.name}' has no explicit target_sources() — sources inlined in add_library/executable",
+                    note=f"Target '{t.name}' has no visible sources — may use set_target_properties or generator expressions",
                 ))
 
-        if not evidence and not no_trace:
+        all_evidence = ts_evidence + inline_evidence
+
+        if not all_evidence and not no_trace:
             return self._na("No targets found to assess source traceability.")
 
-        if evidence and not no_trace:
+        if not no_trace:
             return self._pass(
-                "All targets have explicit target_sources() mappings — clear source traceability",
-                evidence=evidence,
+                "All targets have traceable source files (via target_sources() or inline args)",
+                evidence=all_evidence,
             )
 
-        if not evidence:
+        if not all_evidence:
             return self._manual(
-                "No target_sources() calls found — source-to-target mapping relies on inline argument lists",
+                "No source files visible for any target — source-to-target mapping cannot be confirmed",
                 evidence=no_trace,
                 notes=[
-                    "Consider using target_sources() for explicit source mapping",
-                    "Inline source lists in add_library/add_executable are acceptable but harder to audit",
+                    "Use target_sources() or list source files inline in add_library/add_executable",
+                    "Generator expressions (e.g. $<TARGET_OBJECTS:...>) cannot be statically resolved",
                 ],
             )
 
         return self._pass(
-            "Most targets use target_sources() — source traceability is adequate",
-            evidence=evidence,
+            "Most targets have traceable sources; some targets use generator expressions or external sources",
+            evidence=all_evidence + no_trace,
         )

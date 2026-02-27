@@ -35,6 +35,7 @@ class CmakeTarget:
     is_test: bool = False
     exclude_from_all: bool = False
     platform: str = "common"  # common | windows | linux
+    source_files: List[str] = field(default_factory=list)  # inline source args
 
 
 @dataclass
@@ -140,6 +141,27 @@ _THIRD_PARTY = re.compile(
     re.IGNORECASE,
 )
 _SKIP_TARGET_TYPES = {"IMPORTED", "INTERFACE", "OBJECT", "ALIAS"}
+_TARGET_ARG_KEYWORDS = {
+    "SHARED", "STATIC", "MODULE", "INTERFACE", "OBJECT", "ALIAS",
+    "EXCLUDE_FROM_ALL", "WIN32", "MACOSX_BUNDLE", "IMPORTED", "GLOBAL",
+}
+
+
+def _extract_source_files(parts: List[str]) -> List[str]:
+    """Extract source file names from add_library/add_executable token list.
+
+    Skips the target name (parts[0]), type keywords, and CMake variable refs.
+    Returns tokens that look like source files (contain a dot, slash, or backslash).
+    """
+    sources = []
+    for p in parts[1:]:
+        if p.upper() in _TARGET_ARG_KEYWORDS:
+            continue
+        if p.startswith("$"):
+            continue
+        if "." in p or "/" in p or "\\" in p:
+            sources.append(p)
+    return sources
 _SKIP_DIR_NAMES = frozenset({
     # Previous additions
     "vm", "vms",
@@ -458,10 +480,12 @@ class CMakeParser:
             return
         excl = _EXCL_FROM_ALL.search(args_text) is not None
         is_test = bool(_TEST_NAMES.search(name))
+        source_files = _extract_source_files(parts)
         result.targets.append(CmakeTarget(
             name=name, target_type=ttype,
             file=rel_path, line_no=line_no,
             is_test=is_test, exclude_from_all=excl,
+            source_files=source_files,
         ))
 
     def _handle_add_executable(
@@ -474,10 +498,12 @@ class CMakeParser:
         name = parts[0]
         excl = _EXCL_FROM_ALL.search(args_text) is not None
         is_test = bool(_TEST_NAMES.search(name))
+        source_files = _extract_source_files(parts)
         result.targets.append(CmakeTarget(
             name=name, target_type="EXECUTABLE",
             file=rel_path, line_no=line_no,
             is_test=is_test, exclude_from_all=excl,
+            source_files=source_files,
         ))
 
     # ------------------------------------------------------------------

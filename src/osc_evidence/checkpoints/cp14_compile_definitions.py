@@ -8,7 +8,8 @@ from .base import CheckpointBase, CheckpointResult, Evidence, PASS, MANUAL
 
 _GPL_DEF = re.compile(
     r"\b(GPL|LGPL|HAVE_GPL|USE_GPL|ENABLE_GPL|GPL_VERSION|FFMPEG_GPL|"
-    r"NONFREE|PROPRIETARY|WITH_GPL)\b",
+    r"NONFREE|PROPRIETARY|WITH_GPL|"
+    r"USE_LGPL|ENABLE_LGPL|WITH_LGPL|LGPL_VERSION|HAVE_LGPL)\b",
     re.IGNORECASE,
 )
 
