@@ -8,3 +8,4 @@ build/
 *.egg
 .env
 .venv/
+osc-evidence-master_CLAUDE.md
