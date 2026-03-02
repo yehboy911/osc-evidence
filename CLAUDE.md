@@ -9,10 +9,11 @@ It is designed to produce "code-level evidence" for GPL/LGPL compliance audits �
 ## Install & Run
 
 ```bash
-# Install (requires pip3 / pipx)
-pipx install -e "/Users/OwenYeh/Claude Code/osc-evidence-master"
-# or fallback:
+# Install (pipx NOT available on this machine — use pip3 / miniconda)
 pip3 install -e "/Users/OwenYeh/Claude Code/osc-evidence-master"
+
+# After bumping pyproject.toml version, force reinstall:
+pip3 install -e "/Users/OwenYeh/Claude Code/osc-evidence-master" --force-reinstall
 
 # Print report to stdout
 osc-evidence audit /path/to/cmake/project
@@ -41,7 +42,7 @@ python3 "/Users/OwenYeh/Claude Code/osc-evidence-master/src/osc_evidence/cli.py"
 
 | Flag | Description |
 |------|-------------|
-| `--output / -o FILE` | Write report to file (default: stdout) |
+| `--output / -o FILE` | Write report to FILE (default: auto-generated from project name/version via `_infer_report_name()`) |
 | `--exclude / -e DIR` | Exclude directory prefix (repeatable) |
 | `--config-h FILE` | FFmpeg config.h for enhanced GPL/nonfree detection (CP01/CP04) |
 | `--sbom FILE` | OSC SBOM CSV for GPL/LGPL confirmation (repeatable, CP06/CP10) |
@@ -59,37 +60,37 @@ src/osc_evidence/
 ├── symbol_table.py         # option()/set() variable table + ${VAR} expansion
 ├── conditional_tracker.py  # Stack-based if/elseif/else/endif tracker
 ├── translation_layer.py    # (command, subtype) → (verdict, legal text) dict
-├── checkpoint_engine.py    # Runs all 15 checkpoints, injects config_h/gpl_components/source_dir
+├── checkpoint_engine.py    # Runs all 15 checkpoints, injects config_h/gpl_components/source_dir/sbom_all_names
 ├── report_generator.py     # English Markdown output with tier-based grouping
 └── checkpoints/
     ├── base.py             # CheckpointBase, CheckpointResult, Evidence
     ├── cp01_gpl_flags.py   # ExternalProject CONFIGURE_COMMAND --disable/enable-gpl; config.h scan
-    ├── cp02_lgpl_linking.py        # GPL/LGPL SHARED vs STATIC; GPL+STATIC→FAIL, GPL+SHARED→MANUAL
+    ├── cp02_lgpl_linking.py        # GPL/LGPL SHARED vs STATIC; accepts gpl_components injection; GPL+STATIC→FAIL, GPL+SHARED→MANUAL
     ├── cp03_test_exclusion.py      # BUILD_TESTING / EXCLUDE_FROM_ALL guards; tracks default value
     ├── cp04_proprietary_codec.py   # --enable-nonfree, proprietary_codecs; config.h scan
-    ├── cp05_gpl_lib_id.py          # GPL/LGPL library name pattern matching
+    ├── cp05_gpl_lib_id.py          # GPL/LGPL library name pattern matching; accepts gpl_components injection
     ├── cp06_static_gpl_risk.py     # Two-layer: GPL subdir STATIC targets + main project links
     ├── cp07_install_scope.py       # install() cross-ref against test targets + COMPONENT analysis
     ├── cp08_source_traceability.py # Inline source_files counted as traceable
     ├── cp09_conditional_guards.py  # Only flags test/third-party unconditional subdirs
-    ├── cp10_license_vars.py        # Extlibs Component Audit — **/extlibs/**/include/ discovery
+    ├── cp10_license_vars.py        # Extlibs Component Audit — **/extlibs/**/include/ discovery; accepts sbom_all_names (full SBOM set)
     ├── cp11_submodule_isolation.py # third_party/ with EXCLUDE_FROM_ALL
     ├── cp12_link_visibility.py     # GPL/LGPL-aware visibility; FAIL on no visibility
     ├── cp13_external_gpl_opts.py   # Prioritizes GPL/LGPL EPs without CONFIGURE_COMMAND
     ├── cp14_compile_definitions.py # Expanded LGPL regex (USE_LGPL, ENABLE_LGPL, etc.)
-    └── cp15_runtime_download.py    # Labels GPL/LGPL downloads in evidence notes
+    └── cp15_runtime_download.py    # Labels GPL/LGPL downloads; scans source for MSVC runtime DLL refs → KNOWN ISSUE / MANUAL
 ```
 
 ## Report Sections (rendered order)
 
 1. **Header** — Generated date, Source Directory, CMake Files Scanned, Targets Found, Findings Collected
-2. **Summary** — PASS / FAIL / MANUAL / N/A counts + **Per-Tier Breakdown** table
+2. **Summary** — PASS / FAIL / MANUAL / KNOWN ISSUE / N/A counts + **Per-Tier Breakdown** table (5-column)
 3. **OSC Compliance Checkpoints** — grouped by tier:
    - Tier 1: GPL/LGPL Direct Risk Detection (CP01, CP02, CP04, CP05, CP06)
    - Tier 2: Build System Hygiene (CP03, CP07, CP08, CP09, CP10, CP11, CP12)
    - Tier 3: External Source Tracking (CP13, CP14, CP15)
-4. **Build Graph Summary** — one bullet per target (type, file, line, TEST/EXCLUDE_FROM_ALL tags)
-5. **Action Items** — FAIL subsection then MANUAL subsection, each grouped by tier
+4. **Build Graph Summary** — one bullet per target (type, file, line, TEST/EXCLUDE_FROM_ALL tags) + **Target Type Guide** legend (SHARED/STATIC/EXECUTABLE/OBJECT/MODULE/INTERFACE compliance context)
+5. **Action Items** — FAIL → KNOWN ISSUE → MANUAL subsections, each grouped by tier
 6. **Parser Warnings** — emitted when the CMake parser encounters unexpected syntax (omitted if none)
 
 ## 15 Checkpoints Summary
@@ -97,20 +98,20 @@ src/osc_evidence/
 | ID | Name | Key CMake Constructs |
 |----|------|----------------------|
 | CP01 | GPL Build Flags | ExternalProject_Add CONFIGURE_COMMAND --disable/enable-gpl; config.h #define |
-| CP02 | LGPL Dynamic Linking | add_library SHARED/STATIC for GPL/LGPL names; GPL+STATIC→FAIL, GPL+SHARED→MANUAL |
+| CP02 | GPL/LGPL Dynamic Linking | add_library SHARED/STATIC for GPL/LGPL names (pattern + SBOM-confirmed); GPL+STATIC→FAIL, GPL+SHARED→MANUAL |
 | CP03 | Test Suite Exclusion | add_subdirectory(tests) guarded by BUILD_TESTING; tracks default value |
 | CP04 | Proprietary Codec Detection | --enable-nonfree, proprietary_codecs; config.h #define |
-| CP05 | GPL/LGPL Library Identification | Target/link names matching GPL/LGPL patterns via license_patterns.py |
+| CP05 | GPL/LGPL Library Identification | Target/link/EP names matching GPL/LGPL patterns + SBOM-confirmed names; N/A hint if no --sbom |
 | CP06 | Static Linking GPL Risk | Two-layer: (1) GPL subdir STATIC targets, (2) main project links to confirmed GPL names |
 | CP07 | Install Scope Exclusion | install() cross-ref against test targets + COMPONENT analysis |
 | CP08 | Source-to-Target Traceability | Inline source_files counted as traceable; no sources → MANUAL |
 | CP09 | Conditional Build Guards | add_subdirectory() in if() blocks; only test/third-party unconditional subdirs flagged |
-| CP10 | Extlibs Component Audit | Discovers pre-compiled OSS under **/extlibs/**/include/; cross-refs against SBOM + classify_name() |
+| CP10 | Extlibs Component Audit | Discovers pre-compiled OSS under **/extlibs/**/include/; cross-refs against full SBOM name set (sbom_all_names) + classify_name() |
 | CP11 | Third-Party Submodule Isolation | add_subdirectory(third_party/...) EXCLUDE_FROM_ALL |
 | CP12 | Linking Visibility | PRIVATE/PUBLIC/INTERFACE in target_link_libraries; GPL/LGPL-aware |
 | CP13 | ExternalProject GPL Options | ExternalProject_Add with CONFIGURE_COMMAND; GPL/LGPL EPs prioritized |
 | CP14 | Compile Definitions | target_compile_definitions with GPL/LGPL names; expanded LGPL regex |
-| CP15 | Runtime Download Risk | FetchContent_Declare / ExternalProject_Add with URL; labels GPL/LGPL |
+| CP15 | Runtime Download Risk | FetchContent_Declare / ExternalProject_Add with URL; also scans source for MSVC runtime DLL refs — known DLLs → KNOWN ISSUE, unknown DLLs → MANUAL |
 
 ## Key Design Decisions
 
@@ -118,9 +119,12 @@ src/osc_evidence/
 **English** — this tool's reports go to English-speaking legal counsel (Dennis).
 Do NOT change report strings to Traditional Chinese.
 
-### N/A vs PASS
+### Verdict Semantics
 - `N/A` = no relevant CMake construct found (avoids false PASS)
 - `PASS` = relevant construct found AND it satisfies the legal requirement
+- `KNOWN ISSUE` = implicit build-time dependency with a documented license (e.g. MSVC runtime DLLs); no source-disclosure obligation but must appear in product documentation
+- `MANUAL` = cannot be auto-determined; human review required
+- `FAIL` = compliance risk confirmed
 
 ### Tier Grouping
 Presentation-only concern in `report_generator.py`. The `_TIERS` constant maps checkpoint IDs to display tiers. Checkpoint logic is unaware of tiers — grouping happens entirely at report render time.
@@ -130,7 +134,9 @@ Presentation-only concern in `report_generator.py`. The `_TIERS` constant maps c
 1. **LICENSE file scan** — walks source tree for LICENSE/COPYING files, classifies via `license_patterns.py`
 2. **SBOM CSV parsing** — reads OSC-format CSV, matches license column against GPL/LGPL patterns
 
-Returns `List[GplComponent]` (dataclass with `name`, `license`, `source` fields). Results are injected into CP06 and CP10 by `CheckpointEngine`.
+Returns `List[GplComponent]` (dataclass with `name`, `license`, `source` fields). Results are injected into CP02, CP05, CP06, and CP10 by `CheckpointEngine`.
+
+`build_sbom_name_set(sbom_paths)` is a separate function that returns ALL normalized component names from the SBOM CSVs (regardless of license), used by CP10 to distinguish "in SBOM (any license)" from "not in SBOM at all". Includes alias expansion (`_expand_sbom_name_aliases`) for name mismatches like `snmp++` → `snmp`, `libssh2` → `ssh2`, `websocket++(websocketpp)` → `websocketpp`.
 
 ### License Patterns
 Centralized regex in `license_patterns.py`:

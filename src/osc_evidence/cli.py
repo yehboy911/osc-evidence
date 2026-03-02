@@ -7,13 +7,55 @@ Entry point: osc-evidence audit <source_dir> [--output report.md]
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
 from .cmake_parser import CMakeParser
 from .checkpoint_engine import CheckpointEngine
 from .report_generator import ReportGenerator
-from .gpl_scanner import build_gpl_set
+from .gpl_scanner import build_gpl_set, build_sbom_name_set
+
+
+def _infer_report_name(source_dir: str) -> str:
+    """Generate a report filename from the project name and version.
+
+    Priority order:
+    1. project(... VERSION x.y.z) in top-level CMakeLists.txt
+    2. Version-like component in parent directory path segments
+    3. Fallback: <ProjectName>-compliance-report.md
+    """
+    p = Path(source_dir).resolve()
+    project_name = p.name
+    version = None
+
+    # 1. Try project(... VERSION x.y.z) in top-level CMakeLists.txt
+    cmake_main = p / "CMakeLists.txt"
+    if cmake_main.exists():
+        try:
+            m = re.search(
+                r'\bproject\s*\([^)]*\bVERSION\s+([\d.]+)',
+                cmake_main.read_text(errors='replace'),
+                re.IGNORECASE,
+            )
+            if m:
+                version = m.group(1)
+        except OSError:
+            pass
+
+    # 2. Fall back: walk parent path components for a version number
+    if not version:
+        for part in reversed(p.parts[:-1]):
+            m = re.search(r'(\d+\.\d+(?:\.\d+)*)', part)
+            if m:
+                version = m.group(1)
+                break
+
+    return (
+        f"{project_name}-v{version}-report.md"
+        if version
+        else f"{project_name}-compliance-report.md"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -36,7 +78,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", "-o",
         metavar="FILE",
         default=None,
-        help="Write Markdown report to FILE (default: print to stdout)",
+        help="Write Markdown report to FILE (default: auto-generated from project name/version)",
     )
     audit.add_argument(
         "--exclude", "-e",
@@ -142,6 +184,7 @@ def _run_audit(args: argparse.Namespace) -> int:
 
     # Build confirmed GPL/LGPL component list (LICENSE scan + SBOM CSV)
     gpl_components = build_gpl_set(str(source_dir), sbom_paths or None)
+    sbom_all_names = build_sbom_name_set(sbom_paths or None)
     if gpl_components:
         print(
             f"GPL/LGPL components confirmed: "
@@ -155,6 +198,7 @@ def _run_audit(args: argparse.Namespace) -> int:
         config_h_path=config_h_path,
         gpl_components=gpl_components,
         source_dir=str(source_dir),
+        sbom_all_names=sbom_all_names,
     )
 
     generator = ReportGenerator(
@@ -166,10 +210,10 @@ def _run_audit(args: argparse.Namespace) -> int:
 
     if args.output:
         out_path = Path(args.output)
-        out_path.write_text(report, encoding="utf-8")
-        print(f"Report written to: {out_path}", file=sys.stderr)
     else:
-        print(report)
+        out_path = Path(_infer_report_name(str(source_dir)))
+    out_path.write_text(report, encoding="utf-8")
+    print(f"Report written to: {out_path}", file=sys.stderr)
 
     return 0
 

@@ -54,6 +54,10 @@ _SKIP_LICENSES = {"PROPRIETARY", "IGNORE", "NOT DISTRIBUTED", ""}
 # Version suffix pattern for name normalization
 _VERSION_SUFFIX = re.compile(r"[-_][\d]+(?:\.[\d]+)*(?:[-_.]\w+)*$")
 
+# Alias expansion patterns for SBOM ↔ extlibs name matching
+_PARENS_CONTENT = re.compile(r'\(([^)]+)\)')   # captures text inside (...)
+_LIB_PREFIX     = re.compile(r'^lib(.+)$')     # strips leading "lib"
+
 
 @dataclass
 class GplComponent:
@@ -70,6 +74,39 @@ def _normalize_name(name: str) -> str:
     n = name.strip().lower()
     n = _VERSION_SUFFIX.sub("", n)
     return n
+
+
+def _expand_sbom_name_aliases(name: str) -> "set[str]":
+    """Return all plausible filesystem aliases for a normalized SBOM component name.
+
+    Handles three common mismatches:
+      - snmp++            → also add 'snmp'          (strip ++ suffix)
+      - libssh2           → also add 'ssh2'           (strip lib prefix)
+      - websocket++(websocketpp) → also add 'websocketpp' (extract parenthetical)
+    """
+    aliases: set[str] = {name}
+
+    # Extract parenthetical alternatives and strip parens from base
+    parens_found = _PARENS_CONTENT.findall(name)
+    for alt in parens_found:
+        aliases.add(alt.strip().lower())
+    base_no_parens = _PARENS_CONTENT.sub("", name).strip()
+    if base_no_parens:
+        aliases.add(base_no_parens)
+
+    # Strip ++ / + suffix from each alias so far
+    for a in list(aliases):
+        stripped = a.rstrip('+').strip()
+        if stripped and stripped != a:
+            aliases.add(stripped)
+
+    # Strip lib prefix from each alias so far
+    for a in list(aliases):
+        m = _LIB_PREFIX.match(a)
+        if m:
+            aliases.add(m.group(1))
+
+    return aliases
 
 
 def _classify_license_spdx(license_str: str) -> str:
@@ -217,6 +254,43 @@ def parse_sbom_csv(csv_path: str) -> List[GplComponent]:
         ))
 
     return results
+
+
+def build_sbom_name_set(sbom_paths: Optional[List[str]]) -> "set[str]":
+    """Return a set of ALL normalized component names present in the SBOM CSVs.
+
+    Unlike build_gpl_set(), this includes non-GPL/LGPL components so that
+    CP10 can distinguish "in SBOM (any license)" from "not in SBOM at all".
+    """
+    names: set[str] = set()
+    if not sbom_paths:
+        return names
+
+    for csv_path in sbom_paths:
+        try:
+            with open(csv_path, "r", encoding="utf-8-sig", errors="replace") as f:
+                content = f.read()
+        except OSError:
+            continue
+
+        reader = csv.reader(io.StringIO(content))
+        header_found = False
+        for row in reader:
+            if not row:
+                continue
+            if not header_found:
+                if row[0].strip().replace("\n", " ").upper().startswith("OSS COMPONENT NAME"):
+                    header_found = True
+                continue
+            comp_name = row[0].strip()
+            if not comp_name:
+                continue
+            license_str = row[2].strip() if len(row) > 2 else ""
+            if license_str.upper() in _SKIP_LICENSES:
+                continue
+            names.update(_expand_sbom_name_aliases(_normalize_name(comp_name)))
+
+    return names
 
 
 def build_gpl_set(

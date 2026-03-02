@@ -1,4 +1,4 @@
-"""CP02 — LGPL Dynamic Linking (expanded to GPL+LGPL)"""
+"""CP02 — GPL/LGPL Dynamic Linking"""
 
 from __future__ import annotations
 
@@ -6,27 +6,42 @@ from typing import List
 
 from .. import license_patterns
 from ..cmake_parser import ParseResult
+from ..gpl_scanner import GplComponent
 from .base import CheckpointBase, CheckpointResult, Evidence, FAIL, MANUAL, PASS
-
-_SHARED = __import__("re").compile(r"\bSHARED\b")
-_STATIC = __import__("re").compile(r"\bSTATIC\b")
 
 
 class CP02LgplLinking(CheckpointBase):
     checkpoint_id = "CP02"
-    name = "LGPL Dynamic Linking"
+    name = "GPL/LGPL Dynamic Linking"
+
+    gpl_components: List[GplComponent] = []
 
     def _evaluate(self, pr: ParseResult) -> CheckpointResult:
+        confirmed_all = {c.name for c in self.gpl_components}
+
         links = self._findings_for(pr, "target_link_libraries")
-        gpl_lgpl_links = [f for f in links if license_patterns.has_gpl_lgpl(f.args_text)]
+        gpl_lgpl_links = [
+            f for f in links
+            if license_patterns.has_gpl_lgpl(f.args_text)
+            or any(n in f.args_text.lower() for n in confirmed_all)
+        ]
 
         # Also check add_library for SHARED vs STATIC type
         gpl_lgpl_targets = [
-            t for t in pr.targets if license_patterns.has_gpl_lgpl(t.name)
+            t for t in pr.targets
+            if license_patterns.has_gpl_lgpl(t.name)
+            or any(n in t.name.lower() for n in confirmed_all)
         ]
 
         if not gpl_lgpl_links and not gpl_lgpl_targets:
-            return self._na("No GPL or LGPL-related libraries detected in link commands.")
+            hint = (
+                ""
+                if self.gpl_components
+                else " Provide --sbom to extend matching to confirmed SBOM components."
+            )
+            return self._na(
+                f"No GPL or LGPL-related libraries detected in link commands.{hint}"
+            )
 
         fail_evidence: List[Evidence] = []
         pass_evidence: List[Evidence] = []

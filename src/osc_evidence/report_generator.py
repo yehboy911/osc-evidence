@@ -12,7 +12,7 @@ import datetime
 from typing import List
 
 from .cmake_parser import CmakeTarget, ParseResult
-from .checkpoints.base import CheckpointResult, PASS, FAIL, MANUAL, NA
+from .checkpoints.base import CheckpointResult, PASS, FAIL, MANUAL, NA, KNOWN_ISSUE
 
 
 # Tier grouping for report display
@@ -23,10 +23,11 @@ _TIERS = [
 ]
 
 _VERDICT_BADGE = {
-    PASS:   "**PASS**",
-    FAIL:   "**FAIL**",
-    MANUAL: "_MANUAL_",
-    NA:     "N/A",
+    PASS:        "**PASS**",
+    FAIL:        "**FAIL**",
+    MANUAL:      "_MANUAL_",
+    NA:          "N/A",
+    KNOWN_ISSUE: "_KNOWN ISSUE_",
 }
 
 
@@ -68,26 +69,26 @@ class ReportGenerator:
         )
 
     def _summary_table(self) -> str:
-        counts = {PASS: 0, FAIL: 0, MANUAL: 0, NA: 0}
+        counts = {PASS: 0, FAIL: 0, MANUAL: 0, KNOWN_ISSUE: 0, NA: 0}
         for r in self.results:
             counts[r.verdict] = counts.get(r.verdict, 0) + 1
 
         rows = "\n".join(
             f"| {v} | {counts[v]} |"
-            for v in (PASS, FAIL, MANUAL, NA)
+            for v in (PASS, FAIL, MANUAL, KNOWN_ISSUE, NA)
         )
 
         results_by_id = {r.checkpoint_id: r for r in self.results}
 
         tier_rows: List[str] = []
         for tier_label, cp_ids in _TIERS:
-            tc = {PASS: 0, FAIL: 0, MANUAL: 0, NA: 0}
+            tc = {PASS: 0, FAIL: 0, MANUAL: 0, KNOWN_ISSUE: 0, NA: 0}
             for cp_id in cp_ids:
                 r = results_by_id.get(cp_id)
                 if r:
                     tc[r.verdict] = tc.get(r.verdict, 0) + 1
             tier_rows.append(
-                f"| {tier_label} | {tc[PASS]} | {tc[FAIL]} | {tc[MANUAL]} | {tc[NA]} |"
+                f"| {tier_label} | {tc[PASS]} | {tc[FAIL]} | {tc[MANUAL]} | {tc[KNOWN_ISSUE]} | {tc[NA]} |"
             )
 
         return (
@@ -96,8 +97,8 @@ class ReportGenerator:
             "|--------|-------|\n"
             + rows
             + "\n\n### Per-Tier Breakdown\n\n"
-            "| Tier | PASS | FAIL | MANUAL | N/A |\n"
-            "|------|------|------|--------|-----|\n"
+            "| Tier | PASS | FAIL | MANUAL | KNOWN ISSUE | N/A |\n"
+            "|------|------|------|--------|-------------|-----|\n"
             + "\n".join(tier_rows)
         )
 
@@ -153,25 +154,32 @@ class ReportGenerator:
             lines.append(
                 f"- Target `{t.name}` {label} — `{t.file}` line {t.line_no}{tag_str}"
             )
+
+        lines += [
+            "",
+            "**Target Type Guide (compliance context):**",
+            "- `[SHARED]` — Shared library (.so / .dll / .dylib). LGPL components linked as SHARED satisfy license obligations without requiring source disclosure of the main product.",
+            "- `[STATIC]` — Static archive (.a / .lib), compiled into the final binary. GPL components linked statically trigger copyleft requirements for the entire distributed binary.",
+            "- `[EXECUTABLE]` — Compiled program (deliverable). GPL/LGPL obligations apply when distributed.",
+            "- `[OBJECT]` — Intermediate object file collection; not independently distributed.",
+            "- `[MODULE]` — Loadable plugin / DSO; distribution obligations depend on shipping method.",
+            "- `[INTERFACE]` — Header-only pseudo-target; no compiled output, minimal direct risk.",
+        ]
         return "\n".join(lines)
 
     def _manual_section(self) -> str:
-        manual_results = [r for r in self.results if r.verdict == MANUAL]
         fail_results = [r for r in self.results if r.verdict == FAIL]
+        known_issue_results = [r for r in self.results if r.verdict == KNOWN_ISSUE]
+        manual_results = [r for r in self.results if r.verdict == MANUAL]
 
-        if not manual_results and not fail_results:
+        if not fail_results and not known_issue_results and not manual_results:
             return ""
-
-        # Build lookup: checkpoint_id → tier label
-        cp_to_tier = {}
-        for tier_label, cp_ids in _TIERS:
-            for cp_id in cp_ids:
-                cp_to_tier[cp_id] = tier_label
 
         parts = ["## Action Items"]
 
         for verdict_label, result_set in [
             ("FAIL — Immediate Attention Required", fail_results),
+            ("KNOWN ISSUE — Implicit Build-Time Dependency", known_issue_results),
             ("MANUAL — Human Review Required", manual_results),
         ]:
             if not result_set:
@@ -180,7 +188,6 @@ class ReportGenerator:
 
             # Group results by tier, preserving tier order
             tier_groups: List[tuple] = []
-            seen_tiers: set = set()
             for tier_label, cp_ids in _TIERS:
                 tier_results = [r for r in result_set if r.checkpoint_id in cp_ids]
                 if tier_results:
@@ -191,7 +198,7 @@ class ReportGenerator:
                 for r in tier_results:
                     parts.append(f"##### {r.checkpoint_id} — {r.name}\n")
                     parts.append(f"**Finding:** {r.legal_translation}\n")
-                    if r.verdict == MANUAL and r.manual_notes:
+                    if r.verdict in (MANUAL, KNOWN_ISSUE) and r.manual_notes:
                         for note in r.manual_notes:
                             parts.append(f"- {note}")
                         parts.append("")

@@ -7,9 +7,11 @@ Scans a CMake project's build system and produces a professional Markdown report
 ## Install
 
 ```bash
-pipx install -e .
-# or
-pip3 install -e .
+# Standard install (pipx not available on this machine — use pip3 / miniconda)
+pip3 install -e "/Users/OwenYeh/Claude Code/osc-evidence-master"
+
+# After bumping pyproject.toml version, force reinstall:
+pip3 install -e "/Users/OwenYeh/Claude Code/osc-evidence-master" --force-reinstall
 ```
 
 ## Usage
@@ -39,7 +41,7 @@ osc-evidence audit /path/to/project --no-interactive --output report.md
 
 | Flag | Description |
 |------|-------------|
-| `--output / -o FILE` | Write report to file (default: stdout) |
+| `--output / -o FILE` | Write report to FILE (default: auto-generated from project name/version) |
 | `--exclude / -e DIR` | Exclude directory prefix (repeatable) |
 | `--config-h FILE` | FFmpeg config.h for enhanced GPL/nonfree detection (CP01/CP04) |
 | `--sbom FILE` | OSC SBOM CSV for GPL/LGPL confirmation (repeatable, CP06/CP10) |
@@ -52,7 +54,7 @@ osc-evidence audit /path/to/project --no-interactive --output report.md
 | ID | Checkpoint | Detects |
 |----|-----------|---------|
 | CP01 | GPL Build Flags | `--disable-gpl` / `--enable-gpl` in ExternalProject configure; config.h `#define HAVE_GPL` |
-| CP02 | LGPL Dynamic Linking | GPL/LGPL libs built as SHARED vs STATIC — GPL+STATIC→FAIL, GPL+SHARED→MANUAL |
+| CP02 | GPL/LGPL Dynamic Linking | GPL/LGPL libs (pattern + SBOM-confirmed) built as SHARED vs STATIC — GPL+STATIC→FAIL, GPL+SHARED→MANUAL |
 | CP04 | Proprietary Codec Detection | `--enable-nonfree`, `proprietary_codecs`; config.h `#define HAVE_NONFREE` |
 | CP05 | GPL/LGPL Library Identification | Targets/links matching GPL/LGPL name patterns (ffmpeg, x264, x265, gstreamer, etc.) |
 | CP06 | Static Linking GPL Risk | Two-layer analysis: (1) GPL component subdir STATIC targets, (2) main project links to confirmed GPL names |
@@ -75,7 +77,7 @@ osc-evidence audit /path/to/project --no-interactive --output report.md
 |----|-----------|---------|
 | CP13 | ExternalProject GPL Options | `ExternalProject_Add` with `CONFIGURE_COMMAND`; prioritizes GPL/LGPL EPs without CONFIGURE_COMMAND |
 | CP14 | Compile Definitions | `target_compile_definitions` with GPL/LGPL names; expanded LGPL regex |
-| CP15 | Runtime Download Risk | `FetchContent_Declare` / `ExternalProject_Add` with URL; labels GPL/LGPL downloads |
+| CP15 | Runtime Download Risk | `FetchContent_Declare` / `ExternalProject_Add` with URL; also scans source for MSVC runtime DLL references — known DLLs → KNOWN ISSUE, unknown DLLs → MANUAL |
 
 ## Enhanced Scan Options
 
@@ -121,6 +123,16 @@ The report organizes checkpoints into three tiers by risk category:
 
 Both the checkpoint tables and action items sections are grouped by tier.
 
+## Verdict Types
+
+| Verdict | Meaning |
+|---------|---------|
+| **PASS** | Relevant CMake construct found and satisfies the legal requirement |
+| **FAIL** | Compliance risk confirmed — immediate attention required |
+| _MANUAL_ | Human review required — cannot be auto-determined from CMake alone |
+| _KNOWN ISSUE_ | Implicit build-time dependency with a documented license (e.g. MSVC runtime DLLs) — no source-disclosure obligation, but must appear in product documentation |
+| N/A | No relevant CMake construct found — checkpoint not applicable to this project |
+
 ## Report Format
 
 ```markdown
@@ -137,15 +149,16 @@ Both the checkpoint tables and action items sections are grouped by tier.
 |--------|-------|
 | PASS   | 9     |
 | FAIL   | 0     |
-| MANUAL | 5     |
+| MANUAL | 4     |
+| KNOWN ISSUE | 1 |
 | N/A    | 1     |
 
 ### Per-Tier Breakdown
-| Tier | PASS | FAIL | MANUAL | N/A |
-|------|------|------|--------|-----|
-| Tier 1: GPL/LGPL Direct Risk Detection | 3 | 0 | 2 | 0 |
-| Tier 2: Build System Hygiene | 5 | 0 | 1 | 1 |
-| Tier 3: External Source Tracking | 1 | 0 | 2 | 0 |
+| Tier | PASS | FAIL | MANUAL | KNOWN ISSUE | N/A |
+|------|------|------|--------|-------------|-----|
+| Tier 1: GPL/LGPL Direct Risk Detection | 3 | 0 | 2 | 0 | 0 |
+| Tier 2: Build System Hygiene | 5 | 0 | 1 | 0 | 1 |
+| Tier 3: External Source Tracking | 1 | 0 | 1 | 1 | 0 |
 
 ## OSC Compliance Checkpoints
 
@@ -166,6 +179,10 @@ Both the checkpoint tables and action items sections are grouped by tier.
 
 ### FAIL — Immediate Attention Required
 #### Tier 1: GPL/LGPL Direct Risk Detection
+...
+
+### KNOWN ISSUE — Implicit Build-Time Dependency
+#### Tier 3: External Source Tracking
 ...
 
 ### MANUAL — Human Review Required

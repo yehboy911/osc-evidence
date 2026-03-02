@@ -6,6 +6,7 @@ from typing import List
 
 from .. import license_patterns
 from ..cmake_parser import ParseResult
+from ..gpl_scanner import GplComponent
 from .base import CheckpointBase, CheckpointResult, Evidence, MANUAL
 
 
@@ -24,22 +25,35 @@ class CP05GplLibId(CheckpointBase):
     checkpoint_id = "CP05"
     name = "GPL/LGPL Library Identification"
 
+    gpl_components: List[GplComponent] = []
+
     def _evaluate(self, pr: ParseResult) -> CheckpointResult:
+        confirmed_all = {c.name for c in self.gpl_components}
+
         gpl_lgpl_targets = [
-            t for t in pr.targets if license_patterns.has_gpl_lgpl(t.name)
+            t for t in pr.targets
+            if license_patterns.has_gpl_lgpl(t.name)
+            or any(n in t.name.lower() for n in confirmed_all)
         ]
         gpl_lgpl_links = [
             f for f in self._findings_for(pr, "target_link_libraries")
             if license_patterns.has_gpl_lgpl(f.args_text)
+            or any(n in f.args_text.lower() for n in confirmed_all)
         ]
         gpl_lgpl_eps = [
             f for f in self._findings_for(pr, "ExternalProject_Add")
             if license_patterns.has_gpl_lgpl(f.args_text)
+            or any(n in f.args_text.lower() for n in confirmed_all)
         ]
 
         if not gpl_lgpl_targets and not gpl_lgpl_links and not gpl_lgpl_eps:
+            hint = (
+                ""
+                if self.gpl_components
+                else " Provide --sbom to extend matching to confirmed SBOM components."
+            )
             return self._na(
-                "No known GPL or LGPL library names detected in CMake build system."
+                f"No known GPL or LGPL library names detected in CMake build system.{hint}"
             )
 
         evidence: List[Evidence] = []

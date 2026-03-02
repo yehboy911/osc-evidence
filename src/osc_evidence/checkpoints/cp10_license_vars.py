@@ -8,8 +8,8 @@ and flags undocumented risks or SBOM gaps.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import List, Set
 
 from ..cmake_parser import ParseResult
 from ..gpl_scanner import GplComponent
@@ -39,6 +39,7 @@ class CP10ExtlibsAudit(CheckpointBase):
     # Injected by CheckpointEngine
     source_dir: str = ""
     gpl_components: List[GplComponent] = []
+    sbom_all_names: Set[str] = field(default_factory=set)
 
     def _evaluate(self, pr: ParseResult) -> CheckpointResult:
         if not self.source_dir:
@@ -52,9 +53,9 @@ class CP10ExtlibsAudit(CheckpointBase):
                 "pre-compiled component audit not applicable."
             )
 
-        # Build lookup of SBOM-confirmed GPL/LGPL names
-        sbom_names = {c.name for c in self.gpl_components}
-        no_sbom = len(self.gpl_components) == 0
+        # Build lookup: prefer full SBOM name set; fall back to GPL/LGPL subset
+        sbom_names = self.sbom_all_names if self.sbom_all_names else {c.name for c in self.gpl_components}
+        no_sbom = not sbom_names and len(self.gpl_components) == 0
 
         evidence: List[Evidence] = []
         has_fail = False

@@ -18,6 +18,7 @@ PASS = "PASS"
 FAIL = "FAIL"
 MANUAL = "MANUAL"
 NA = "N/A"
+KNOWN_ISSUE = "KNOWN ISSUE"
 
 
 @dataclass
@@ -81,6 +82,18 @@ class CheckpointBase(ABC):
             checkpoint_id=self.checkpoint_id,
             name=self.name,
             verdict=MANUAL,
+            legal_translation=legal,
+            evidence=evidence or [],
+            manual_notes=notes or [],
+        )
+
+    def _known_issue(
+        self, legal: str, evidence: List[Evidence] = None, notes: List[str] = None
+    ) -> CheckpointResult:
+        return CheckpointResult(
+            checkpoint_id=self.checkpoint_id,
+            name=self.name,
+            verdict=KNOWN_ISSUE,
             legal_translation=legal,
             evidence=evidence or [],
             manual_notes=notes or [],

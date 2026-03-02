@@ -10,6 +10,7 @@ from typing import List, Optional
 from .cmake_parser import ParseResult
 from .checkpoints.base import CheckpointResult
 from .gpl_scanner import GplComponent
+from typing import Set
 from .checkpoints.cp01_gpl_flags import CP01GplFlags
 from .checkpoints.cp02_lgpl_linking import CP02LgplLinking
 from .checkpoints.cp03_test_exclusion import CP03TestExclusion
@@ -53,6 +54,7 @@ class CheckpointEngine:
         config_h_path: Optional[str] = None,
         gpl_components: Optional[List[GplComponent]] = None,
         source_dir: Optional[str] = None,
+        sbom_all_names: Optional[Set[str]] = None,
     ) -> List[CheckpointResult]:
         results: List[CheckpointResult] = []
         for cp in _ALL_CHECKPOINTS:
@@ -66,6 +68,9 @@ class CheckpointEngine:
                 # Inject source_dir into CP10
                 if source_dir is not None and hasattr(cp, "source_dir"):
                     cp.source_dir = source_dir
+                # Inject full SBOM name set into CP10
+                if sbom_all_names is not None and hasattr(cp, "sbom_all_names"):
+                    cp.sbom_all_names = sbom_all_names
                 result = cp.run(parse_result)
             except Exception as exc:
                 from .checkpoints.base import CheckpointResult, MANUAL
