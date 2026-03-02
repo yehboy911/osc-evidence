@@ -218,7 +218,7 @@ src/osc_evidence/
     ├── cp07_install_scope.py
     ├── cp08_source_traceability.py
     ├── cp09_conditional_guards.py
-    ├── cp10_license_vars.py
+    ├── cp10_extlibs_audit.py
     ├── cp11_submodule_isolation.py
     ├── cp12_link_visibility.py
     ├── cp13_external_gpl_opts.py

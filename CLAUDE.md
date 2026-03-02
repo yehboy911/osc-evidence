@@ -73,7 +73,7 @@ src/osc_evidence/
     ├── cp07_install_scope.py       # install() cross-ref against test targets + COMPONENT analysis
     ├── cp08_source_traceability.py # Inline source_files counted as traceable
     ├── cp09_conditional_guards.py  # Only flags test/third-party unconditional subdirs
-    ├── cp10_license_vars.py        # Extlibs Component Audit — **/extlibs/**/include/ discovery; accepts sbom_all_names (full SBOM set)
+    ├── cp10_extlibs_audit.py       # Extlibs Component Audit — **/extlibs/**/include/ discovery; accepts sbom_all_names (full SBOM set)
     ├── cp11_submodule_isolation.py # third_party/ with EXCLUDE_FROM_ALL
     ├── cp12_link_visibility.py     # GPL/LGPL-aware visibility; FAIL on no visibility
     ├── cp13_external_gpl_opts.py   # Prioritizes GPL/LGPL EPs without CONFIGURE_COMMAND
