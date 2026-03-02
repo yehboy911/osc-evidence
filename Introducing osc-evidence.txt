@@ -1,0 +1,187 @@
+---
+  整體設計哲學
+
+  這 15 項 checkpoint 的設計圍繞一個核心問題：「如果今天發佈 (distribute) 這個 CMake 專案的 binary，在
+   GPL/LGPL 合規上有沒有風險？」
+
+  設計上有幾個重要原則：
+
+  1. 五級判定 (PASS / FAIL / MANUAL / KNOWN ISSUE / N/A)：避免 false positive。如果完全沒找到相關的 CMake
+  construct，回傳 N/A 而不是 PASS（防止律師誤以為已經通過審查）。KNOWN ISSUE 代表 implicit build-time
+  dependency，有明確已知授權（如 MSVC runtime DLL），無 source 揭露義務，但需記錄於 product documentation。
+  2. 保守策略：當 ${VAR} 無法展開時，一律 MANUAL（不猜測）。
+  3. Evidence-driven：每個判定都附帶具體的程式碼片段、行號、檔案路徑，讓律師能「指著程式碼說話」。
+
+  ---
+  三層架構脈絡
+
+  15 項 checkpoint 可以按「審查什麼」分成三個層次：
+
+  第一層：GPL/LGPL 直接風險偵測 (CP01, CP02, CP04, CP05, CP06)
+
+  這是最核心的合規問題——產品是否直接牽涉 GPL 程式碼。
+
+  CP: CP01 GPL Build Flags
+  Python 腳本: checkpoints/cp01_gpl_flags.py
+  看什麼: ExternalProject_Add 的 CONFIGURE_COMMAND 裡有沒有 --enable-gpl / --disable-gpl
+  設計邏輯: 很多專案（如 FFmpeg）用 configure flag 決定是否啟用 GPL 功能。--disable-gpl =
+    PASS，--enable-gpl = FAIL，混合或模糊 = MANUAL。這是最直接的「開關」型判定。
+
+  >>> 關於 --enable-gpl / --disable-gpl，這個部分目前看起來不會在軟體工具 Source Code 裡面的 CMakeLists 裡面出現。就現有經驗來看，它只發生在 FFmpeg 的 config.h 檔案中，所以這項檢查可能永遠都會出現 N/A 的狀態，
+  應該更適合的方式是將它作為一個選單上的選項，讓使用者選擇要不要去掃描特定的檔案（如 config.h）。那如果需要掃描的話，可能就是由使用者貼上 link ，來進行掃描即可。ie. https://source.chromium.org/chromium/chromium/src/+/refs/tags/142.0.7444.226:third_party/ffmpeg/chromium/config/Chromium/win/x64/config.h
+  你覺得這樣是否可行？
+  ────────────────────────────────────────
+  CP: CP02 GPL/LGPL Dynamic Linking
+  Python 腳本: checkpoints/cp02_lgpl_linking.py
+  看什麼: GPL/LGPL 庫是 SHARED 還是 STATIC（名稱匹配 + SBOM 確認）
+  設計邏輯: LGPL 的「escape hatch」：動態連結 (SHARED) 不需要 open source 你的程式碼，靜態連結
+  (STATIC)
+    則需要。GPL+STATIC → FAIL，GPL+SHARED → MANUAL，LGPL+SHARED → PASS。同時檢查 add_library 的 type
+  和 target_link_libraries 的 subtype。
+  ────────────────────────────────────────
+  CP: CP04 Proprietary Codec Detection
+  Python 腳本: checkpoints/cp04_proprietary_codec.py
+  看什麼: --enable-nonfree、proprietary_codecs 等 flag
+  設計邏輯: FFmpeg 的 --enable-nonfree 會拉入不可再散佈的專有 codec（如 libfdk-aac）。這跟 GPL
+    不同——nonfree = 你連散佈的權利都沒有。--disable-nonfree 是安全的。
+  ────────────────────────────────────────
+  CP: CP05 GPL Library Identification
+  Python 腳本: checkpoints/cp05_gpl_lib_id.py
+  看什麼: target 或 link 名稱匹配 gpl/ffmpeg/x264/x265 等；接受 SBOM 注入的確認元件
+  設計邏輯: 純粹的「名字偵測」。找到 GPL/LGPL 名稱 → MANUAL（名字匹配不足以判定授權，交給律師最終
+    確認）。完全找不到相關庫 → N/A（無需律師關注）。提供 --sbom 可擴展偵測範圍至 SBOM 確認元件。
+  ────────────────────────────────────────
+  CP: CP06 Static Linking GPL Risk
+  Python 腳本: checkpoints/cp06_static_gpl_risk.py
+  看什麼: 兩層分析：(1) GPL 子目錄下的 STATIC targets；(2) 主專案連結到確認 GPL 元件名稱
+  設計邏輯: 跟 CP02 聚焦 GPL/LGPL 動態連結不同，CP06 專門看 GPL 庫的靜態連結風險。靜態連結 GPL 庫 =
+    你的整個 binary 都要用 GPL 發佈。需注入 gpl_components；無確認 GPL 元件 → N/A。
+    FAIL（靜態連結）/ MANUAL（類型不明或 GPL+SHARED）/ PASS（LGPL+SHARED 或無連結）。
+
+  CP01 vs CP13 的區分：CP01 看「configure flag 的具體內容（enable/disable）」，CP13 看「有沒有
+  CONFIGURE_COMMAND 本身」。CP01 是精確判定，CP13 是防漏網之魚。
+
+  CP02 vs CP06 的區分：CP02 聚焦 GPL/LGPL 動態 vs 靜態連結；CP06 做兩層分析，以確認的 GPL 元件為基礎，
+  判定靜態連結是否構成直接 FAIL 風險。
+
+  ---
+  第二層：Build System 衛生檢查 (CP03, CP07, CP08, CP09, CP10, CP11, CP12)
+
+  這層不直接偵測 GPL 程式碼，而是檢查 build system
+  的「防護措施」是否到位——確保不會不小心把不該發佈的東西包進去。
+
+  CP: CP03 Test Suite Exclusion
+  Python 腳本: checkpoints/cp03_test_exclusion.py
+  看什麼: add_subdirectory(tests) 是否受 BUILD_TESTING 或 EXCLUDE_FROM_ALL 保護
+  設計邏輯: 測試程式碼常連結 GPL 的 test framework（如 gtest）。如果沒有 guard，cmake --install 會把
+    test binary 也裝進去。guard = PASS，沒 guard = MANUAL。同時追蹤 BUILD_TESTING 的預設值。
+  ────────────────────────────────────────
+  CP: CP07 Install Scope Exclusion
+  Python 腳本: checkpoints/cp07_install_scope.py
+  看什麼: install() 有沒有 EXCLUDE_FROM_ALL，有沒有包含 test/sample
+  設計邏輯: install() 決定「發佈時包含哪些檔案」。如果 test/sample target 出現在 install scope
+    裡但沒排除，可能會不小心發佈 GPL 測試程式碼。
+  ────────────────────────────────────────
+  CP: CP08 Source-to-Target Traceability
+  Python 腳本: checkpoints/cp08_source_traceability.py
+  看什麼: 有沒有 target_sources()；inline source files（add_library/add_executable 直接列出的 .c/.cpp）
+  設計邏輯: source 和 target 有明確對應關係 = 可追溯。inline source_files 也算 traceable（有明確
+    add_library/add_executable 記錄）。完全沒有 sources → MANUAL（可接受但難稽核）。
+  ────────────────────────────────────────
+  CP: CP09 Conditional Build Guards
+  Python 腳本: checkpoints/cp09_conditional_guards.py
+  看什麼: add_subdirectory() 是否在 if() 區塊裡（只針對 test/third-party 子目錄）
+  設計邏輯: 如果一個 test 或 third-party subdirectory 是「無條件包含」的，代表它一定會被編譯進產品。
+    有 guard 代表可以透過 CMake option 關掉，提供彈性。核心子目錄（非 test/third-party）無條件包含屬正常，
+    不予標記。
+  ────────────────────────────────────────
+  CP: CP10 Extlibs Component Audit
+  Python 腳本: checkpoints/cp10_extlibs_audit.py
+  看什麼: 掃 **/extlibs/**/include/ 目錄，發現預編譯 OSS 元件（header-only 或 prebuilt lib）；
+    跨比對 SBOM
+  設計邏輯: extlibs 目錄通常存放已預編譯的第三方元件，不會出現在靜態的 CMake target 分析中。收集
+    include/ 下的直接子目錄名稱及頂層 header stem 作為元件名稱，推斷平台，並跨比對 SBOM 全名單（任意授權）。
+    FAIL（GPL/LGPL 不在 SBOM）/ MANUAL（無 SBOM 或有 gap）/ PASS（全已追蹤）/ N/A（無 extlibs 目錄）。
+  ────────────────────────────────────────
+  CP: CP11 Third-Party Submodule Isolation
+  Python 腳本: checkpoints/cp11_submodule_isolation.py
+  看什麼: add_subdirectory(third_party/...) 有沒有 EXCLUDE_FROM_ALL 或條件 guard
+  設計邏輯: 第三方程式碼如果直接無條件納入 build graph，它的所有 target 都會進入預設 build。用
+    EXCLUDE_FROM_ALL 或 if() guard 隔離，確保只有明確需要的部分被編譯。
+  ────────────────────────────────────────
+  CP: CP12 Linking Visibility
+  Python 腳本: checkpoints/cp12_link_visibility.py
+  看什麼: target_link_libraries() 有沒有 PRIVATE/PUBLIC/INTERFACE；GPL/LGPL-aware
+  設計邏輯: CMake 的連結可見性決定依賴是否「傳播」。PRIVATE = 只有這個 target 看得到（GPL
+    隔離的首選）。PUBLIC = 所有 consumer 都會連結（GPL 可能傳播）。沒有 qualifier = legacy
+    style，無法靜態分析 → FAIL（GPL/LGPL 時）。
+
+  CP03 + CP07 的互補：CP03 檢查 test 目錄的「入口」（add_subdirectory），CP07 檢查 test target
+  的「出口」（install）。兩者一起確保 test 程式碼既不被預設編譯、也不被預設安裝。
+
+  CP09 + CP11 的互補：CP09 看所有 add_subdirectory 的 conditional guard 狀態；CP11 專門看 third_party/
+   類路徑。CP09 是通用的 guard 檢查，CP11 加上了 third-party 的特定語義（isolation 需求更高）。
+
+  ---
+  第三層：外部來源追蹤 (CP13, CP14, CP15)
+
+  這層處理「程式碼從哪裡來」的問題——build time 下載的東西不會出現在靜態 SBOM 裡。
+
+  CP: CP13 ExternalProject GPL Options
+  Python 腳本: checkpoints/cp13_external_gpl_opts.py
+  看什麼: ExternalProject_Add 有沒有 CONFIGURE_COMMAND；GPL/LGPL EP 優先標記
+  設計邏輯: 如果沒有 CONFIGURE_COMMAND，external project 用預設設定編譯，可能預設啟用 GPL 功能（如
+    FFmpeg 預設啟用 GPL）。有 CONFIGURE_COMMAND = PASS（至少表示 build flag 是刻意設定的）。
+    GPL/LGPL 命名的 EP 且無 CONFIGURE_COMMAND → 高風險優先標記。
+  ────────────────────────────────────────
+  CP: CP14 Compile Definitions
+  Python 腳本: checkpoints/cp14_compile_definitions.py
+  看什麼: target_compile_definitions() 裡有沒有 GPL/LGPL 相關的 define
+  設計邏輯: 有些專案用 #ifdef ENABLE_GPL 來條件編譯 GPL 程式碼。如果 CMake 裡設了
+    -DENABLE_GPL=1，就代表 GPL code path 被啟用。搜尋 GPL、LGPL、HAVE_GPL、USE_LGPL、ENABLE_LGPL、
+    WITH_LGPL、LGPL_VERSION、NONFREE 等 define name。
+  ────────────────────────────────────────
+  CP: CP15 Runtime Download Risk
+  Python 腳本: checkpoints/cp15_runtime_download.py
+  看什麼: FetchContent_Declare / ExternalProject_Add 有沒有 URL 或 GIT_REPOSITORY；
+    source 中的 MSVC runtime DLL 引用（.cmake, .txt, .bat, .ps1, .py, .sh）
+  設計邏輯: FetchContent 和 ExternalProject 在 build time 從網路拉取程式碼，不會出現在 repo 的檔案樹
+    裡。已知 MSVC runtime DLL（msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll 等）屬於 implicit
+    build-time dependency，授權明確 → KNOWN ISSUE（需記錄於 product doc，無 source 揭露義務）。
+    未知 DLL 或 FetchContent/EP URL → MANUAL。完全沒有 → N/A。
+
+  CP13 vs CP01 的分工：
+  - CP01：「ExternalProject 的 configure flag 具體啟用/停用了什麼？」（精確 flag 判定）
+  - CP13：「ExternalProject 有沒有 CONFIGURE_COMMAND？」（有沒有在控制 build options）
+
+  ---
+  判定優先權邏輯
+
+  多數 checkpoint 使用相同的優先權模式：
+
+  if FAIL evidence exists → FAIL（一個 FAIL 就足以判定）
+  if KNOWN ISSUE evidence → KNOWN ISSUE（已知授權的 implicit dependency，需文件記錄）
+  if only PASS evidence  → PASS
+  if any ambiguity       → MANUAL
+  if nothing found       → N/A
+
+  例外：
+  - CP05 找到 GPL/LGPL 庫 → MANUAL（名字匹配不足以判定授權）；完全找不到 → N/A
+  - CP10 無 extlibs 目錄 → N/A；有 extlibs 但無 SBOM → MANUAL
+  - CP15 已知 MSVC DLL → KNOWN ISSUE；未知 DLL 或 URL → MANUAL；完全沒有 → N/A
+
+  ---
+  Parser 如何餵養 Checkpoint
+
+  cmake_parser.py 扮演「中央分類站」角色：
+
+  1. 每個 CMake 命令 被識別後，parser 做初步 subtype 分類（如 _ep_subtype 把 ExternalProject_Add 分成
+  disable_gpl、enable_gpl、gpl_flag、nonfree、has_configure、external_project）
+  2. 每個 RawFinding 帶著 condition_stack（if/else 上下文）和 unresolved_vars（未展開的變數）
+  3. Checkpoint 只做 high-level 邏輯判定，不重複 parse。它透過 _findings_for(command) 或
+  _findings_for_subtype(subtype) 過濾 findings
+
+  這種 parser → finding → checkpoint 的分離設計，讓新增 checkpoint 只需寫「判定邏輯」，不需動 parser。
+
+  ---
+  有需要我深入某幾個 checkpoint 的細節，或者分析哪些 checkpoint 之間可能有判定衝突嗎？

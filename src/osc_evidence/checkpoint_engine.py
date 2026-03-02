@@ -20,7 +20,7 @@ from .checkpoints.cp06_static_gpl_risk import CP06StaticGplRisk
 from .checkpoints.cp07_install_scope import CP07InstallScope
 from .checkpoints.cp08_source_traceability import CP08SourceTraceability
 from .checkpoints.cp09_conditional_guards import CP09ConditionalGuards
-from .checkpoints.cp10_license_vars import CP10ExtlibsAudit
+from .checkpoints.cp10_extlibs_audit import CP10ExtlibsAudit
 from .checkpoints.cp11_submodule_isolation import CP11SubmoduleIsolation
 from .checkpoints.cp12_link_visibility import CP12LinkVisibility
 from .checkpoints.cp13_external_gpl_opts import CP13ExternalGplOpts
